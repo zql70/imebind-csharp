@@ -1,0 +1,25 @@
+# 运行时产物
+imebind.log
+*.bak
+rules.txt.abtest.bak
+
+# make-icon.ps1 / preview-font.ps1 生成的对图表
+icon-preview.png
+icon-sizes.png
+font-sheet-*.png
+
+# 编译产物（建议用 GitHub Releases 分发 exe，而不是提交进仓库）
+ImeBind.exe
+bin/
+obj/
+
+# 编辑器
+.vs/
+.vscode/
+*.user
+
+# 本地开发笔记（TSF 接口细节、踩坑、图标实现细节），不发布
+DEV-NOTES.md
+
+# 首次运行会自动生成，不提交（与 Rust 版一致）
+rules.txt
