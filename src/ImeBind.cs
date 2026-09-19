@@ -17,7 +17,7 @@
 //   ImeBind.exe --list                     列出本机已安装的输入法及其 TIP 字符串
 //   ImeBind.exe --status                   打印前台程序与当前输入法
 //   ImeBind.exe --menu-dump                打印托盘菜单的内容（自检用，不点鼠标也能验证）
-//   ImeBind.exe --activate <TIP> [mode]    手动激活指定 TIP（mode: both|session|process）
+//   ImeBind.exe --activate <TIP|HKL> [mode] 手动激活指定 TIP 或键盘布局（mode: both|session|process）
 //
 // 托盘菜单：状态与规则一览 / 暂停·恢复自动切换 / 重新加载 rules.txt / 编辑 rules.txt /
 //           查看日志 / 打开程序所在文件夹 / 退出（退出时会还原输入法）
@@ -137,6 +137,7 @@ class Rule
 class Program
 {
     const uint TF_PROFILETYPE_INPUTPROCESSOR = 0x0001;
+    const uint TF_PROFILETYPE_KEYBOARDLAYOUT = 0x0002;
     const uint TF_IPPMF_FORPROCESS = 0x10000000;
     const uint TF_IPPMF_FORSESSION = 0x20000000;
     const int ERROR_ALREADY_EXISTS = 183;
@@ -241,6 +242,33 @@ class Program
         try { profiles.ChangeCurrentLanguage(langid); }
         catch { }
         return mgr.ActivateProfile(TF_PROFILETYPE_INPUTPROCESSOR, langid, ref c, ref g, IntPtr.Zero, FlagMode);
+    }
+
+    // 激活键盘布局型 profile（HKL，如"美式键盘"）。KEYBOARDLAYOUT 类型下
+    // ActivateProfile 忽略 clsid/guidProfile，用 hkl 定位。
+    static int ActivateHkl(ushort langid, IntPtr hkl)
+    {
+        Guid empty = Guid.Empty;
+        try { profiles.ChangeCurrentLanguage(langid); }
+        catch { }
+        return mgr.ActivateProfile(TF_PROFILETYPE_KEYBOARDLAYOUT, langid, ref empty, ref empty, hkl, FlagMode);
+    }
+
+    // 解析 "0804:HKL:08040804" 形式的键盘布局串（GetActiveTip 对键盘布局型 profile 的输出）。
+    // 不是该形式返回 false——调用方再退回 ParseTip。
+    static bool ParseHklTip(string tip, out ushort langid, out IntPtr hkl)
+    {
+        langid = 0; hkl = IntPtr.Zero;
+        if (tip == null || tip.Length < 5) return false;
+        int colon = tip.IndexOf(':');
+        if (colon != 4) return false;
+        if (!ushort.TryParse(tip.Substring(0, 4), NumberStyles.HexNumber, CultureInfo.InvariantCulture, out langid)) return false;
+        string rest = tip.Substring(5);
+        if (!rest.StartsWith("HKL:", StringComparison.Ordinal)) return false;
+        long v;
+        if (!long.TryParse(rest.Substring(4), NumberStyles.HexNumber, CultureInfo.InvariantCulture, out v)) return false;
+        hkl = new IntPtr(v);
+        return true;
     }
 
     static bool ParseTip(string tip, out ushort langid, out Guid clsid, out Guid profile)
@@ -385,12 +413,22 @@ class Program
     static void RestoreForced()
     {
         if (forcedTip == null) return;
-        ushort langid; Guid clsid; Guid prof;
-        if (ParseTip(forcedTip, out langid, out clsid, out prof))
+        // forced 有两种形式：TIP（TSF 输入法）和 HKL（"0804:HKL:08040804"，键盘布局如
+        // "美式键盘"——GetActiveTip 对布局型 profile 输出这种形式）。HKL 形式 ParseTip
+        // 解析不了，之前在这里被 if 静默吞掉：不还原、不记日志。
+        ushort langid; Guid clsid; Guid prof; IntPtr hkl;
+        int hr;
+        if (ParseHklTip(forcedTip, out langid, out hkl))
+            hr = ActivateHkl(langid, hkl);
+        else if (ParseTip(forcedTip, out langid, out clsid, out prof))
+            hr = ActivateTip(langid, clsid, prof);
+        else
         {
-            int hr = ActivateTip(langid, clsid, prof);
-            Log(string.Format(CultureInfo.InvariantCulture, "还原为 {0} (hr=0x{1:X8})", forcedTip, hr));
+            Log("还原目标无法解析，已放弃: " + forcedTip);
+            forcedTip = null;
+            return;
         }
+        Log(string.Format(CultureInfo.InvariantCulture, "还原为 {0} (hr=0x{1:X8})", forcedTip, hr));
         forcedTip = null;
     }
 
@@ -673,16 +711,21 @@ class Program
         }
         if (mode == "--activate")
         {
-            if (args.Length < 2) { Log("用法: ImeBind.exe --activate <TIP> [both|session|process]"); return; }
+            if (args.Length < 2) { Log("用法: ImeBind.exe --activate <TIP|HKL> [both|session|process]"); return; }
             if (args.Length > 2)
             {
                 string f = args[2].ToLowerInvariant();
                 if (f == "session") FlagMode = TF_IPPMF_FORSESSION;
                 else if (f == "process") FlagMode = TF_IPPMF_FORPROCESS;
             }
-            ushort langid; Guid clsid; Guid prof;
-            if (!ParseTip(args[1], out langid, out clsid, out prof)) { Log("TIP 解析失败: " + args[1]); return; }
-            int hr = ActivateTip(langid, clsid, prof);
+            // 两种形式都收：TIP（TSF 输入法）和 HKL（键盘布局，如 0409:HKL:04090409）
+            ushort langid; Guid clsid; Guid prof; IntPtr hkl;
+            int hr;
+            if (ParseHklTip(args[1], out langid, out hkl))
+                hr = ActivateHkl(langid, hkl);
+            else if (ParseTip(args[1], out langid, out clsid, out prof))
+                hr = ActivateTip(langid, clsid, prof);
+            else { Log("TIP 解析失败: " + args[1]); return; }
             Thread.Sleep(300);
             Log(string.Format(CultureInfo.InvariantCulture, "已激活 {0} (hr=0x{1:X8})，当前为 {2}", args[1], hr, GetActiveTip()));
             return;
